@@ -1,54 +1,27 @@
-# Create Check-CLFS.ps1 from inside PowerShell (no smart quotes)
-$s = @'
-[CmdletBinding()] param()
-$ErrorActionPreference = 'Stop'
+# === ONE-PASTE CLFS CHECK ===
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+$ErrorActionPreference='Stop'
 
-function Assert-Admin {
-  $wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-  if (-not $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Run this script from an elevated PowerShell (Run as administrator).'
-  }
-}
+Write-Host '=== OS INFO ===' -ForegroundColor Cyan
+Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | Format-List
 
-function Get-OSInfo {
-  try {
-    $os = Get-CimInstance Win32_OperatingSystem
-    [pscustomobject]@{
-      Caption=$os.Caption; Version=$os.Version; BuildNumber=$os.BuildNumber; InstallDate=$os.InstallDate
-    }
-  } catch { Write-Warning ('OS info failed: {0}' -f $_.Exception.Message) }
-}
+Write-Host "`n=== CLFS BINARY INFO ===" -ForegroundColor Cyan
+$clfs = "$env:WINDIR\System32\drivers\clfs.sys"
+if (Test-Path $clfs) {
+  Get-Item $clfs | Select-Object FullName,Length,LastWriteTimeUtc
+  Get-FileHash $clfs -Algorithm SHA256
+} else { Write-Host "clfs.sys not found at $clfs" }
 
-function Get-CLFSBinaryInfo {
-  $driverPath = Join-Path $env:WINDIR 'System32\drivers\clfs.sys'
-  if (Test-Path $driverPath) {
-    try {
-      $fi = Get-Item $driverPath
-      $sha = Get-FileHash $driverPath -Algorithm SHA256
-      [pscustomobject]@{
-        Path=$fi.FullName; Length=$fi.Length; Version=$fi.VersionInfo.FileVersion;
-        SHA256=$sha.Hash; LastWriteTimeUtc=$fi.LastWriteTimeUtc
-      }
-    } catch { Write-Warning ('CLFS binary info failed: {0}' -f $_.Exception.Message) }
-  } else {
-    [pscustomobject]@{ Path=$driverPath; Present=$false }
-  }
-}
+Write-Host "`n=== SC QUERY clfs ===" -ForegroundColor Cyan
+cmd /c 'sc query clfs' 2>&1
 
-function Get-CLFSServiceInfo {
-  Write-Output '=== SC QUERY clfs ==='
-  try { cmd /c 'sc query clfs' 2>&1 } catch { Write-Warning ('sc query failed: {0}' -f $_.Exception.Message) }
-  Write-Output "`n=== SC QC clfs ==="
-  try { cmd /c 'sc qc clfs' 2>&1 } catch { Write-Warning ('sc qc failed: {0}' -f $_.Exception.Message) }
-}
+Write-Host "`n=== SC QC clfs ===" -ForegroundColor Cyan
+cmd /c 'sc qc clfs' 2>&1
 
-function Get-CLFSDriverEntry {
-  Write-Output '=== DRIVERQUERY (filter: clfs) ==='
-  try { cmd /c 'driverquery /v' 2>&1 | Select-String -Pattern '(?i)\bclfs(\.sys)?\b' }
-  catch { Write-Warning ('driverquery failed: {0}' -f $_.Exception.Message) }
-}
+Write-Host "`n=== DRIVERQUERY (filter: clfs) ===" -ForegroundColor Cyan
+cmd /c 'driverquery /v' 2>&1 | Select-String -Pattern '(?i)\bclfs(\.sys)?\b'
 
-# Add-Type for QueryDosDevice & CreateFile (ASCII only)
+# --- Add-Type for QueryDosDevice / CreateFile (ASCII only) ---
 $src = @"
 using System;
 using System.Runtime.InteropServices;
@@ -78,60 +51,33 @@ public static class K32 {
 "@
 Add-Type -TypeDefinition $src -ErrorAction Stop
 
-function Test-DosDeviceLink {
-  param([Parameter(Mandatory=$true)][string]$Name)
-  $sb = New-Object System.Text.StringBuilder 8192
-  $len = [K32]::QueryDosDevice($Name,$sb,$sb.Capacity)
-  if ($len -eq 0) {
-    $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    [pscustomobject]@{ Name=$Name; Exists=$false; Targets=@(); Error=$err }
-  } else {
-    $targets = $sb.ToString().TrimEnd([char]0) -split [char]0
-    [pscustomobject]@{ Name=$Name; Exists=$true; Targets=$targets; Error=0 }
-  }
-}
-
-function Test-OpenDevicePath {
-  param([Parameter(Mandatory=$true)][string]$Path)
-  $acc = [K32]::GENERIC_READ -bor [K32]::GENERIC_WRITE
-  $shr = [K32]::FILE_SHARE_READ -bor [K32]::FILE_SHARE_WRITE -bor [K32]::FILE_SHARE_DELETE
-  $h = [K32]::CreateFile($Path,$acc,$shr,[IntPtr]::Zero,[K32]::OPEN_EXISTING,[K32]::FILE_ATTRIBUTE_NORMAL,[IntPtr]::Zero)
-  if ($h -eq [K32]::INVALID_HANDLE_VALUE) {
-    $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    [pscustomobject]@{ Path=$Path; Opened=$false; LastError=$err }
-  } else {
-    [void][K32]::CloseHandle($h)
-    [pscustomobject]@{ Path=$Path; Opened=$true; LastError=0 }
-  }
-}
-
-# Main
-Assert-Admin
-
-Write-Host '=== OS INFO ===' -ForegroundColor Cyan
-Get-OSInfo | Format-List
-
-Write-Host "`n=== CLFS BINARY INFO ===" -ForegroundColor Cyan
-Get-CLFSBinaryInfo | Format-List
-
-Write-Host "`n" -NoNewline; Get-CLFSServiceInfo
-Write-Host "`n" -NoNewline; Get-CLFSDriverEntry
-
 Write-Host "`n=== QueryDosDevice('clfscntrl') ===" -ForegroundColor Cyan
-$dos = Test-DosDeviceLink -Name 'clfscntrl'
-$dos | Format-List
+$sb = New-Object System.Text.StringBuilder 8192
+$len = [K32]::QueryDosDevice('clfscntrl', $sb, $sb.Capacity)
+if ($len -eq 0) {
+  $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  Write-Host "Exists: False   Error: $err"
+} else {
+  ($sb.ToString().TrimEnd([char]0) -split [char]0) | ForEach-Object { "Target: $_" }
+}
 
 Write-Host "`n=== Attempt CreateFile('\\\\.\\clfscntrl') ===" -ForegroundColor Cyan
-$open = Test-OpenDevicePath -Path '\\.\clfscntrl'
-$open | Format-List
+$acc = [K32]::GENERIC_READ -bor [K32]::GENERIC_WRITE
+$shr = [K32]::FILE_SHARE_READ -bor [K32]::FILE_SHARE_WRITE -bor [K32]::FILE_SHARE_DELETE
+$h = [K32]::CreateFile('\\.\clfscntrl', $acc, $shr, [IntPtr]::Zero, [K32]::OPEN_EXISTING, [K32]::FILE_ATTRIBUTE_NORMAL, [IntPtr]::Zero)
+if ($h -eq [K32]::INVALID_HANDLE_VALUE) {
+  $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  Write-Host "Opened: False   LastError: $err"
+} else {
+  [void][K32]::CloseHandle($h)
+  Write-Host 'Opened: True   LastError: 0'
+}
 
 Write-Host "`n=== Summary ===" -ForegroundColor Yellow
-if (-not $dos.Exists -and -not $open.Opened) {
+if ($len -eq 0 -and ($h -eq [K32]::INVALID_HANDLE_VALUE)) {
   Write-Host 'No user-mode device link clfscntrl found; CLFS likely exposes no \\.\ control device on this build.'
-} elseif ($dos.Exists -and $open.Opened) {
+} elseif ($len -ne 0 -and ($h -ne [K32]::INVALID_HANDLE_VALUE)) {
   Write-Host 'Device link exists and is openable.'
 } else {
-  Write-Host 'Mixed results - inspect details above.'
+  Write-Host 'Mixed results - check details above.'
 }
-'@
-[IO.File]::WriteAllText("$PWD\Check-CLFS.ps1",$s,[Text.UTF8Encoding]::new($false))
