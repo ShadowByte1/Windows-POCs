@@ -1,9 +1,9 @@
 <# 
   Check-CLFS.ps1
-  - Shows OS info
-  - Reports CLFS service/driver status and clfs.sys hash/version
-  - Checks for \GLOBAL??\clfscntrl (\\.\clfscntrl) via QueryDosDevice
-  - Tries to open \\.\clfscntrl safely
+  - OS info
+  - CLFS service/driver status and clfs.sys hash/version
+  - QueryDosDevice for clfscntrl
+  - Safe CreateFile test on \\.\clfscntrl
 #>
 
 [CmdletBinding()]
@@ -26,7 +26,7 @@ function Get-OSInfo {
             InstallDate = $os.InstallDate
         }
     } catch {
-        Write-Warning "Unable to query OS info: $($_.Exception.Message)"
+        Write-Warning ("Unable to query OS info: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -44,7 +44,7 @@ function Get-CLFSBinaryInfo {
                 LastWriteTime = $fi.LastWriteTimeUtc
             }
         } catch {
-            Write-Warning "Failed to read CLFS binary info: $($_.Exception.Message)"
+            Write-Warning ("Failed to read CLFS binary info: {0}" -f $_.Exception.Message)
         }
     } else {
         [pscustomobject]@{
@@ -56,18 +56,10 @@ function Get-CLFSBinaryInfo {
 
 function Get-CLFSServiceInfo {
     Write-Output "=== SC QUERY clfs ==="
-    try {
-        cmd /c 'sc query clfs' 2>&1
-    } catch {
-        Write-Warning "sc query failed: $($_.Exception.Message)"
-    }
+    try { cmd /c 'sc query clfs' 2>&1 } catch { Write-Warning ("sc query failed: {0}" -f $_.Exception.Message) }
 
     Write-Output "`n=== SC QC clfs ==="
-    try {
-        cmd /c 'sc qc clfs' 2>&1
-    } catch {
-        Write-Warning "sc qc failed: $($_.Exception.Message)"
-    }
+    try { cmd /c 'sc qc clfs' 2>&1 } catch { Write-Warning ("sc qc failed: {0}" -f $_.Exception.Message) }
 }
 
 function Get-CLFSDriverEntry {
@@ -75,11 +67,11 @@ function Get-CLFSDriverEntry {
     try {
         cmd /c 'driverquery /v' 2>&1 | Select-String -Pattern '(?i)\bclfs(\.sys)?\b'
     } catch {
-        Write-Warning "driverquery failed: $($_.Exception.Message)"
+        Write-Warning ("driverquery failed: {0}" -f $_.Exception.Message)
     }
 }
 
-# --- Add-Type for kernel32 P/Invokes (QueryDosDevice + CreateFile) ---
+# --- Add-Type for kernel32 P/Invokes (QueryDosDevice, CreateFile) ---
 $kernel32 = @"
 using System;
 using System.Runtime.InteropServices;
@@ -115,7 +107,7 @@ public static class K32 {
 "@
 
 try { Add-Type -TypeDefinition $kernel32 -ErrorAction Stop }
-catch { Write-Error "Add-Type failed: $($_.Exception.Message)"; exit 1 }
+catch { Write-Error ("Add-Type failed: {0}" -f $_.Exception.Message); exit 1 }
 
 function Test-DosDeviceLink {
     param([Parameter(Mandatory=$true)][string]$Name)
@@ -123,20 +115,10 @@ function Test-DosDeviceLink {
     $len = [K32]::QueryDosDevice($Name, $sb, $sb.Capacity)
     if ($len -eq 0) {
         $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        [pscustomobject]@{
-            Name    = $Name
-            Exists  = $false
-            Targets = @()
-            Error   = $err
-        }
+        [pscustomobject]@{ Name=$Name; Exists=$false; Targets=@(); Error=$err }
     } else {
         $targets = $sb.ToString().TrimEnd([char]0) -split [char]0
-        [pscustomobject]@{
-            Name    = $Name
-            Exists  = $true
-            Targets = $targets
-            Error   = 0
-        }
+        [pscustomobject]@{ Name=$Name; Exists=$true; Targets=$targets; Error=0 }
     }
 }
 
@@ -180,5 +162,5 @@ if (-not $dos.Exists -and -not $open.Opened) {
 } elseif ($dos.Exists -and $open.Opened) {
     Write-Host "Device link exists and is openable."
 } else {
-    Write-Host "Mixed results—inspect details above."
+    Write-Host "Mixed results - inspect details above."
 }
